@@ -2,6 +2,8 @@
 
 把 Claude Code 的工作狀態變成武俠場景！每個 agent 化身武林弟子，在修煉場中各展身手。
 
+![武俠修煉場截圖](screenshot.png)
+
 ## 功能
 
 - 即時監控 Claude Code 的 JSONL transcript
