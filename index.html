@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚔ 武俠修煉場 - Multi-Agent Monitor</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&family=Ma+Shan+Zheng&family=Noto+Serif+TC:wght@400;700&display=swap');
+  :root{--bg:#0a0a0f;--bg2:#12121c;--ink:#1a1a2e;--ink2:#3a3a5c;--gold:#c9a84c;--gold-d:#8a6d2b;--red:#d94040;--jade:#4a8c6f;--jade-b:#5cb88a;--parch:#d4c5a0;--dim:#6a6a8a;--txt:#b0b0cc;}
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:var(--bg);color:var(--txt);font-family:'Noto Serif TC','Ma Shan Zheng',serif;overflow:hidden;height:100vh;display:flex;flex-direction:column;align-items:center;padding:6px 12px;}
+  body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 80%,rgba(74,140,111,.05) 0%,transparent 50%),radial-gradient(ellipse at 80% 20%,rgba(201,168,76,.04) 0%,transparent 50%);pointer-events:none;z-index:0;}
+  .wrap{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:8px;width:100%;height:100%;}
+  .title-bar{display:flex;align-items:center;gap:16px;flex-shrink:0;}
+  .title{font-family:'ZCOOL KuaiLe',serif;font-size:24px;color:var(--gold);text-shadow:0 0 20px rgba(201,168,76,.25);letter-spacing:6px;}
+  .conn{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);}
+  .conn .cd{width:7px;height:7px;border-radius:50%;background:var(--red);transition:background .3s;}
+  .conn .cd.on{background:var(--jade-b);box-shadow:0 0 5px rgba(92,184,138,.5);}
+  .scene-wrap{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;width:100%;}
+  canvas#scene{display:block;border:2px solid rgba(201,168,76,.25);border-radius:6px;box-shadow:0 0 40px rgba(0,0,0,.5),0 0 15px rgba(201,168,76,.05);}
+  .roster{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;max-width:100%;padding:0 8px;flex-shrink:0;}
+  .ac{display:flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(18,18,28,.85);border:1px solid var(--ink2);border-radius:4px;font-size:12px;cursor:pointer;transition:all .2s;user-select:none;backdrop-filter:blur(4px);}
+  .ac:hover{border-color:var(--gold-d);}
+  .ac .d{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+  .ac .n{color:var(--parch);font-family:'ZCOOL KuaiLe',serif;font-size:13px;}
+  .ac .s{color:var(--jade-b);font-size:11px;}
+  .ac .x{margin-left:2px;color:var(--dim);font-size:12px;opacity:.3;transition:opacity .2s;}
+  .ac .x:hover{opacity:1;color:var(--red);}
+  .loading{position:absolute;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:100;transition:opacity .8s;border-radius:6px;}
+  .loading.done{opacity:0;pointer-events:none;}
+  .loading-text{font-family:'ZCOOL KuaiLe',serif;font-size:18px;color:var(--gold);letter-spacing:4px;}
+  .loading-sub{font-size:12px;color:var(--dim);margin-top:8px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="title-bar">
+    <div class="title">武 俠 修 煉 場</div>
+    <div class="conn"><span class="cd" id="connDot"></span><span id="connText">Demo</span></div>
+  </div>
+  <div class="scene-wrap">
+    <div class="scene-inner" style="position:relative;display:inline-block;">
+      <canvas id="scene"></canvas>
+      <div class="loading" id="loadingOverlay">
+        <div class="loading-text">運功載入中…</div>
+        <div class="loading-sub" id="loadSt">準備素材</div>
+      </div>
+    </div>
+  </div>
+  <div class="roster" id="roster"></div>
+</div>
+
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+const W=760, H=400, CHAR_S=110; // design coordinate system
+const WALK_SPEED = 1.8; // px per frame
+const cv=document.getElementById('scene'), cx=cv.getContext('2d');
+
+// ============================================================
+// RESPONSIVE RESIZE
+// ============================================================
+function resize(){
+  const dpr=window.devicePixelRatio||1;
+  const container=document.querySelector('.scene-wrap');
+  const rect=container.getBoundingClientRect();
+  const availW=rect.width-8, availH=rect.height-8;
+  const aspect=W/H;
+  let dw,dh;
+  if(availW/availH>aspect){dh=Math.max(200,availH);dw=dh*aspect;}
+  else{dw=Math.max(300,availW);dh=dw/aspect;}
+  cv.style.width=dw+'px';
+  cv.style.height=dh+'px';
+  cv.width=Math.round(dw*dpr);
+  cv.height=Math.round(dh*dpr);
+}
+cv.width=760;cv.height=400; // fallback
+resize();
+window.addEventListener('resize',resize);
+requestAnimationFrame(resize); // ensure layout is computed
+
+// ============================================================
+// ZONES — 每個狀態對應的場景區域（3×2 網格，中心點制）
+// 多人同區時以中心為軸心向外擴散
+// ============================================================
+const ZONES = {
+  idle:     { label: '打坐區', emoji: '🧘', cx: 140, cy: 210 },
+  thinking: { label: '運功台', emoji: '🌀', cx: 380, cy: 210 },
+  reading:  { label: '藏經閣', emoji: '📜', cx: 620, cy: 210 },
+  done:     { label: '演武廳', emoji: '✨', cx: 140, cy: 345 },
+  writing:  { label: '練劍場', emoji: '⚔', cx: 380, cy: 345 },
+  running:  { label: '跑道',   emoji: '💨', cx: 620, cy: 345 },
+};
+
+// ============================================================
+// IMAGE LOADER
+// ============================================================
+const COLORS=['blue','red','green','purple','brown','teal'];
+const ALL_STATES=['idle','thinking','writing','reading','running','done','walk'];
+const imgs={bg:null,chars:{}};
+let loadTotal=0,loadDone=0,allLoaded=false;
+
+function loadImg(src){
+  return new Promise(r=>{
+    const i=new Image();
+    i.onload=()=>{loadDone++;r(i);};
+    i.onerror=()=>{loadDone++;r(null);};
+    i.src=src;
+  });
+}
+
+async function loadAll(){
+  loadTotal=1;
+  for(const c of COLORS)loadTotal+=ALL_STATES.length;
+  imgs.bg=await loadImg('bg.png');
+  for(const c of COLORS){
+    imgs.chars[c]={};
+    for(const s of ALL_STATES) imgs.chars[c][s]=await loadImg(`${c}-${s}.png`);
+  }
+  allLoaded=true;
+  document.getElementById('loadingOverlay').classList.add('done');
+}
+setTimeout(()=>{if(!allLoaded){allLoaded=true;document.getElementById('loadingOverlay').classList.add('done');}},2500);
+loadAll();
+
+// ============================================================
+// AGENTS
+// ============================================================
+const SN={idle:'打坐修煉',thinking:'運功催動',writing:'出劍攻伐',reading:'翻閱秘笈',running:'施展輕功',done:'大功告成'};
+const SQ={
+  idle:['心如止水','靜待天機','吐納之間','萬物歸一','無念無想'],
+  thinking:['凝神聚氣…','推演中…','參悟奧義…','暗運玄功…','以意導氣…'],
+  writing:['看劍！','劍出鞘矣','一劍破萬法','接招吧','破！'],
+  reading:['有意思…','原來如此','秘笈所載…','且讓我看看','妙哉'],
+  running:['踏風而行','快！','凌波微步','追風逐月','閃！'],
+  done:['承讓承讓','大功告成！','任務已了','劍已歸鞘','多謝指教'],
+};
+const ROBE_HEX=['#4a6fa5','#8a4a4a','#5a7a5a','#7a6a9a','#8a7a5a','#5a8a8a'];
+const NAMES=['令狐沖','張無忌','段譽','蕭峰','楊過','郭靖','韋小寶','虛竹','黃蓉','小龍女','趙敏','任盈盈','周芷若','王語嫣','阿紫','石破天'];
+
+let agents=[],nid=0,fc=0,connected=false,demoMode=true,usedN=new Set();
+
+function pickN(){const a=NAMES.filter(n=>!usedN.has(n));const n=a.length?a[Math.random()*a.length|0]:'弟子'+nid;usedN.add(n);return n;}
+
+// 擴散算法：以區域中心為圓心，人越多圈越大
+function getExpandedPosition(zone, agentIdx, totalInZone) {
+  if (totalInZone <= 1) return { x: zone.cx, y: zone.cy };
+  const radius = 50 + totalInZone * 10;
+  const angle = (agentIdx / totalInZone) * Math.PI * 2 - Math.PI / 2;
+  return {
+    x: zone.cx + Math.cos(angle) * radius,
+    y: zone.cy + Math.sin(angle) * radius * 0.45,
+  };
+}
+
+// 重新分配某區域所有角色的位置
+function repositionZone(state) {
+  const zone = ZONES[state];
+  if (!zone) return;
+  const inZone = agents
+    .filter(a => a.slotState === state)
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const total = inZone.length;
+  inZone.forEach((a, idx) => {
+    const pos = getExpandedPosition(zone, idx, total);
+    if (Math.abs(a.targetX - pos.x) > 2 || Math.abs(a.targetY - pos.y) > 2) {
+      a.targetX = pos.x;
+      a.targetY = pos.y;
+      if (Math.abs(a.x - pos.x) > 3 || Math.abs(a.y - pos.y) > 3) {
+        a.isWalking = true;
+        a.facingRight = a.targetX > a.x;
+      }
+    }
+  });
+}
+
+function mkAgent(id,name,ci){
+  const c=ci%COLORS.length;
+  const zone = ZONES.idle;
+  return{
+    id:id||`d-${nid++}`, name:name||pickN(),
+    // 狀態
+    state:'idle', pendingState:null, tool:'',
+    // 外觀
+    colorIdx:c, colorName:COLORS[c], colorHex:ROBE_HEX[c],
+    // 位置 & 移動
+    x: zone.cx, y: zone.cy,
+    targetX: zone.cx, targetY: zone.cy,
+    slotState: 'idle',
+    isWalking: false,
+    facingRight: true,
+    // UI
+    bub:'', bt:0, bobPhase:Math.random()*Math.PI*2,
+  };
+}
+
+function setSt(a, newState, tool) {
+  if (a.state === newState && !a.isWalking && a.slotState === newState) return;
+  if (a.pendingState === newState && a.isWalking && a.slotState === newState) return;
+  if (tool !== undefined) a.tool = tool;
+
+  const oldState = a.slotState;
+
+  // 設定新狀態
+  a.pendingState = newState;
+  a.slotState = newState;
+  a.isWalking = true;
+
+  // 重新分配新區域所有角色位置（含自己）
+  repositionZone(newState);
+  // 舊區域人數減少，也要重新排列
+  if (oldState !== newState) repositionZone(oldState);
+
+  // 決定面向
+  a.facingRight = a.targetX > a.x;
+
+  // 氣泡
+  const q = SQ[newState]||SQ.idle;
+  a.bub = q[Math.random()*q.length|0];
+  a.bt = 180;
+}
+
+function updateAgentMovement(a) {
+  if (!a.isWalking) return;
+
+  const dx = a.targetX - a.x;
+  const dy = a.targetY - a.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+
+  if (dist < WALK_SPEED + 1) {
+    // 到達！
+    a.x = a.targetX;
+    a.y = a.targetY;
+    a.isWalking = false;
+    if (a.pendingState) {
+      a.state = a.pendingState;
+      a.pendingState = null;
+    }
+    // 到達後根據位置決定面向
+    if (a.state === 'writing' || a.state === 'running') a.facingRight = true;
+  } else {
+    // 移動
+    const vx = (dx / dist) * WALK_SPEED;
+    const vy = (dy / dist) * WALK_SPEED;
+    a.x += vx;
+    a.y += vy;
+    a.facingRight = vx > 0;
+  }
+}
+
+// ============================================================
+// CONTROLS
+// ============================================================
+
+function updateR(){
+  document.getElementById('roster').innerHTML=agents.map(a=>{
+    const st=a.isWalking?'移動中…':SN[a.state];
+    const sc=a.state==='done'?'var(--gold)':a.isWalking?'var(--dim)':'var(--jade-b)';
+    return `<div class="ac" style="border-color:${a.colorHex}50" onclick="cycSt('${a.id}')">
+      <span class="d" style="background:${a.colorHex}"></span>
+      <span class="n">${a.name}</span>
+      <span class="s" style="color:${sc}">${st}</span>
+      ${demoMode?`<span class="x" onclick="event.stopPropagation();rmAgent('${a.id}')">✕</span>`:''}
+    </div>`;
+  }).join('');
+}
+
+// ============================================================
+// DRAWING HELPERS
+// ============================================================
+
+function drawCharImage(img, x, y, size, flipH) {
+  if (!img) return false;
+  cx.save();
+  if (flipH) {
+    cx.translate(x + size, y);
+    cx.scale(-1, 1);
+    cx.drawImage(img, 0, 0, size, size);
+  } else {
+    cx.drawImage(img, x, y, size, size);
+  }
+  cx.restore();
+  return true;
+}
+
+// fallback 簡單剪影
+function drawFallback(x, y, s, color, state, isWalking, frame) {
+  const cx2=x+s/2, headR=s*0.16;
+  cx.save(); cx.globalAlpha=0.75; cx.fillStyle=color;
+
+  // 頭
+  cx.beginPath(); cx.arc(cx2,y+s*0.22,headR,0,Math.PI*2); cx.fill();
+
+  if (isWalking) {
+    // 走路：身體傾斜
+    cx.beginPath(); cx.ellipse(cx2,y+s*0.5,s*0.14,s*0.2,0.05,0,Math.PI*2); cx.fill();
+    // 腿擺動
+    const legSwing=Math.sin(frame*0.15)*8;
+    cx.fillStyle='#3a3a5c';
+    cx.fillRect(cx2-6,y+s*0.68,4,s*0.18);
+    cx.fillRect(cx2+2+legSwing*0.3,y+s*0.65,4,s*0.2);
+  } else if (state==='idle') {
+    // 盤腿
+    cx.beginPath(); cx.ellipse(cx2,y+s*0.55,s*0.18,s*0.15,0,0,Math.PI*2); cx.fill();
+    cx.beginPath(); cx.ellipse(cx2,y+s*0.7,s*0.22,s*0.06,0,0,Math.PI*2); cx.fill();
+  } else {
+    // 站立
+    cx.beginPath(); cx.ellipse(cx2,y+s*0.52,s*0.16,s*0.2,0,0,Math.PI*2); cx.fill();
+    cx.fillStyle='#3a3a5c';
+    cx.fillRect(cx2-7,y+s*0.7,5,s*0.18);
+    cx.fillRect(cx2+2,y+s*0.7,5,s*0.18);
+    // 劍
+    if(state==='writing'){cx.strokeStyle='#c0c8d8';cx.lineWidth=2;cx.beginPath();cx.moveTo(cx2+s*0.1,y+s*0.4);cx.lineTo(cx2+s*0.4,y+s*0.25);cx.stroke();}
+    // 卷軸
+    if(state==='reading'){cx.fillStyle='#d4c5a0';cx.globalAlpha=0.6;cx.fillRect(cx2-s*0.15,y+s*0.32,s*0.3,s*0.07);}
+  }
+
+  cx.globalAlpha=0.25;cx.font='9px sans-serif';cx.fillStyle='#aaa';cx.textAlign='center';
+  cx.fillText('素材待載入',cx2,y+s-4);
+  cx.restore();
+}
+
+// ---- 特效 ----
+function fxQi(x,y,s,frame,strong){
+  const cxp=x+s/2,cyp=y+s*0.45,n=strong?16:10,r=strong?50:35,sp=strong?.07:.04;
+  const ph=frame*sp;
+  for(let i=0;i<n;i++){
+    const a=(i/n)*Math.PI*2+ph,rr=r+Math.sin(a*2.5+ph*.5)*r*.3;
+    const px=cxp+Math.cos(a)*rr,py=cyp+Math.sin(a)*rr*.7;
+    cx.globalAlpha=.25+Math.sin(ph+i)*.12;
+    cx.fillStyle=i%3===0?'#7aeaaf':i%3===1?'#5cb88a':'#4a8c6f';
+    cx.beginPath();cx.arc(px,py,2+Math.sin(frame*.1+i),0,Math.PI*2);cx.fill();
+  }
+  if(strong){cx.globalAlpha=.06+Math.sin(frame*.04)*.03;const g=cx.createRadialGradient(cxp,cyp,5,cxp,cyp,40);g.addColorStop(0,'rgba(92,184,138,.3)');g.addColorStop(1,'rgba(92,184,138,0)');cx.fillStyle=g;cx.beginPath();cx.arc(cxp,cyp,40,0,Math.PI*2);cx.fill();}
+  cx.globalAlpha=1;
+}
+
+function fxSword(x,y,s,frame){
+  const t=(frame%45)/45;if(t>.5)return;
+  const sx=x+s*.6,sy=y+s*.35,len=50+t*70,al=.5*(1-t/.5);
+  cx.save();cx.globalAlpha=al;cx.strokeStyle='#e8eef8';cx.lineWidth=2;cx.shadowColor='#a0c0ff';cx.shadowBlur=8;
+  cx.beginPath();cx.moveTo(sx,sy);cx.lineTo(sx+len,sy-5+Math.sin(frame*.3)*4);cx.stroke();
+  cx.shadowBlur=0;
+  for(let i=0;i<4;i++){const px=sx+len*(.3+Math.random()*.7),py=sy-5+(Math.random()-.5)*16;cx.fillStyle=Math.random()>.5?'#ffe8c0':'#c0d8ff';cx.globalAlpha=al*.7;cx.beginPath();cx.arc(px,py,1+Math.random(),0,Math.PI*2);cx.fill();}
+  cx.restore();
+}
+
+function fxSpeed(x,y,s,frame){
+  cx.save();cx.globalAlpha=.15;cx.strokeStyle='#999';cx.lineWidth=1;
+  for(let i=0;i<4;i++){const ly=y+12+i*s*.13+Math.sin(frame*.4+i)*3,lx=x-35-i*10;cx.beginPath();cx.moveTo(lx,ly);cx.lineTo(lx+25+Math.random()*20,ly);cx.stroke();}
+  cx.restore();
+}
+
+function fxGold(x,y,s,frame){
+  const cxp=x+s/2,cyp=y+s*.4,ph=frame*.05;
+  cx.save();cx.globalAlpha=.07+Math.sin(ph)*.03;
+  const g=cx.createRadialGradient(cxp,cyp,8,cxp,cyp,55+Math.sin(ph)*8);
+  g.addColorStop(0,'rgba(201,168,76,.3)');g.addColorStop(1,'rgba(201,168,76,0)');
+  cx.fillStyle=g;cx.beginPath();cx.arc(cxp,cyp,60,0,Math.PI*2);cx.fill();
+  for(let i=0;i<7;i++){const py=(y+s)-(frame*1+i*16)%90,px=cxp+Math.sin(frame*.035+i*1.5)*25;cx.globalAlpha=.4*(1-((y+s)-py)/90);cx.fillStyle=i%2?'#c9a84c':'#ffe8a0';cx.beginPath();cx.arc(px,py,1.5,0,Math.PI*2);cx.fill();}
+  cx.restore();
+}
+
+function fxScroll(x,y,s,frame){
+  if(frame%60>40)return;
+  cx.save();cx.globalAlpha=.1;cx.fillStyle='#ffe8a0';cx.beginPath();cx.arc(x+s/2,y+s*.33,12,0,Math.PI*2);cx.fill();cx.restore();
+}
+
+// 走路時腳下的小塵土
+function fxDust(x,y,s,frame){
+  cx.save();cx.globalAlpha=.12;
+  for(let i=0;i<3;i++){
+    const dx=x+s/2-15+Math.sin(frame*.2+i*2)*8-i*6;
+    const dy=y+s-4+Math.random()*4;
+    cx.fillStyle='#888';
+    cx.beginPath();cx.arc(dx,dy,1.5+Math.random(),0,Math.PI*2);cx.fill();
+  }
+  cx.restore();
+}
+
+// ============================================================
+// FALLBACK BACKGROUND
+// ============================================================
+function drawFallbackBg(f){
+  // 天空
+  const sg=cx.createLinearGradient(0,0,0,H);sg.addColorStop(0,'#0a0a18');sg.addColorStop(.5,'#0f1028');sg.addColorStop(1,'#1a1828');
+  cx.fillStyle=sg;cx.fillRect(0,0,W,H);
+
+  // 星星
+  cx.fillStyle='#e8e8f0';
+  [[50,20],[120,35],[200,15],[350,25],[450,40],[550,18],[650,30],[100,55],[300,12],[520,50],[700,22],[400,8]].forEach(([sx,sy])=>{
+    cx.globalAlpha=.12+Math.sin(f*.02+sx*.3+sy)*.12;cx.beginPath();cx.arc(sx,sy,1,0,Math.PI*2);cx.fill();
+  });cx.globalAlpha=1;
+
+  // 月亮
+  const mg=cx.createRadialGradient(630,45,5,630,45,50);mg.addColorStop(0,'rgba(212,197,160,.6)');mg.addColorStop(.3,'rgba(212,197,160,.12)');mg.addColorStop(1,'rgba(212,197,160,0)');
+  cx.fillStyle=mg;cx.fillRect(580,0,100,95);
+  cx.fillStyle='#d4c5a0';cx.globalAlpha=.8;cx.beginPath();cx.arc(630,45,14,0,Math.PI*2);cx.fill();cx.globalAlpha=1;
+
+  // 遠山
+  cx.globalAlpha=.07;cx.fillStyle='#3a3a5c';cx.beginPath();
+  cx.moveTo(0,280);cx.lineTo(80,160);cx.lineTo(180,230);cx.lineTo(300,120);cx.lineTo(440,210);cx.lineTo(560,140);cx.lineTo(680,220);cx.lineTo(760,170);cx.lineTo(760,400);cx.lineTo(0,400);cx.fill();cx.globalAlpha=1;
+
+  // 地面（下移配合下排角色）
+  const gg=cx.createLinearGradient(0,260,0,400);gg.addColorStop(0,'#1c1a24');gg.addColorStop(1,'#0e0c14');
+  cx.fillStyle=gg;cx.fillRect(0,270,W,130);
+  // 石板路紋理
+  cx.globalAlpha=.06;cx.fillStyle='#2a2830';
+  for(let i=0;i<W;i+=40)cx.fillRect(i,340,38,2);
+  for(let i=20;i<W;i+=40)cx.fillRect(i,355,38,2);
+  cx.globalAlpha=1;
+
+  // 竹子
+  cx.globalAlpha=.1;cx.fillStyle='#4a8c6f';
+  [25,35,700,712,724].forEach(bx=>{
+    cx.fillRect(bx,50,3,300);
+    for(let ny=70;ny<340;ny+=35)cx.fillRect(bx-2,ny,7,2);
+    const lw=Math.sin(f*.02+bx)* 3;
+    cx.fillRect(bx-7+lw,65,9,2);cx.fillRect(bx+3-lw,85,7,2);
+  });cx.globalAlpha=1;
+
+  // 燈籠
+  [75,680].forEach(lx=>{
+    cx.globalAlpha=.55;cx.fillStyle='#d94040';cx.beginPath();cx.ellipse(lx,105,7,11,0,0,Math.PI*2);cx.fill();
+    const lg=cx.createRadialGradient(lx,105,3,lx,105,30);lg.addColorStop(0,'rgba(255,96,64,.08)');lg.addColorStop(1,'rgba(255,96,64,0)');
+    cx.fillStyle=lg;cx.globalAlpha=1;cx.fillRect(lx-30,75,60,60);
+  });cx.globalAlpha=1;
+
+  // Zone 標示（依 ZONES 中心點繪製）
+  cx.save();cx.font='12px "ZCOOL KuaiLe",serif';cx.textAlign='center';
+  for(const [k,z] of Object.entries(ZONES)){
+    const lx=z.cx, ly=z.cy-65;
+    const txt=z.emoji+' '+z.label;
+    const tw=cx.measureText(txt).width;
+    // 暗色底板
+    cx.globalAlpha=.2;cx.fillStyle='#0a0a18';
+    cx.beginPath();cx.roundRect(lx-tw/2-6,ly-11,tw+12,17,4);cx.fill();
+    // 金色文字
+    cx.globalAlpha=.35;cx.fillStyle='#c9a84c';
+    cx.fillText(txt,lx,ly);
+  }
+  cx.restore();
+
+  // 匾額
+  cx.globalAlpha=.22;cx.fillStyle='#2a1810';cx.fillRect(295,22,170,36);
+  cx.strokeStyle='rgba(201,168,76,.15)';cx.lineWidth=1;cx.strokeRect(297,24,166,32);
+  cx.globalAlpha=.5;cx.font='16px "ZCOOL KuaiLe",serif';cx.fillStyle='#c9a84c';cx.textAlign='center';
+  cx.fillText('武 林 修 煉 場',380,48);cx.textAlign='left';cx.globalAlpha=1;
+
+  // 落葉
+  cx.globalAlpha=.1;
+  for(let i=0;i<6;i++){
+    const lx=((f*.25+i*113)%(W+30))-15,ly=((f*.12+i*67)%(H*.65))+40;
+    cx.fillStyle=i%2?'#8a6030':'#5a8040';
+    cx.beginPath();cx.ellipse(lx,ly,3,1.3,f*.015+i,0,Math.PI*2);cx.fill();
+  }cx.globalAlpha=1;
+}
+
+// ============================================================
+// FIREFLIES
+// ============================================================
+let flies=[];for(let i=0;i<12;i++)flies.push({x:Math.random()*W,y:40+Math.random()*320,vx:(Math.random()-.5)*.35,vy:(Math.random()-.5)*.25,ph:Math.random()*Math.PI*2,sz:1.5+Math.random()*1.2});
+function drawFlies(f){
+  for(const fl of flies){
+    fl.x+=fl.vx+Math.sin(f*.01+fl.ph)*.15;fl.y+=fl.vy+Math.cos(f*.008+fl.ph)*.12;
+    if(fl.x<-10)fl.x=W+10;if(fl.x>W+10)fl.x=-10;if(fl.y<30)fl.y=370;if(fl.y>380)fl.y=30;
+    const b=.12+Math.sin(f*.05+fl.ph)*.12;
+    cx.globalAlpha=b*.3;cx.fillStyle='#ffe8a0';cx.beginPath();cx.arc(fl.x,fl.y,fl.sz*3.5,0,Math.PI*2);cx.fill();
+    cx.globalAlpha=b;cx.fillStyle='#fff8e0';cx.beginPath();cx.arc(fl.x,fl.y,fl.sz,0,Math.PI*2);cx.fill();
+  }cx.globalAlpha=1;
+}
+
+// ============================================================
+// SHADOW
+// ============================================================
+function drawShadow(x,y,s){
+  cx.save();cx.globalAlpha=.12;cx.fillStyle='#000';
+  cx.beginPath();cx.ellipse(x+s/2,y+s-2,s*.28,s*.06,0,0,Math.PI*2);cx.fill();
+  cx.restore();
+}
+
+// ============================================================
+// MAIN RENDER
+// ============================================================
+function render(){
+  const s=cv.width/W;
+  cx.setTransform(1,0,0,1,0,0);
+  cx.clearRect(0,0,cv.width,cv.height);
+  cx.setTransform(s,0,0,s,0,0);
+  fc++;
+
+  // 背景
+  if(imgs.bg)cx.drawImage(imgs.bg,0,0,W,H);else drawFallbackBg(fc);
+
+  // 更新所有 agent 移動
+  agents.forEach(a=>updateAgentMovement(a));
+  // 每 30 幀更新 roster 顯示
+  if(fc%30===0)updateR();
+
+  // 深度排序 (y 軸)
+  const sorted=[...agents].sort((a,b)=>a.y-b.y);
+
+  for(const a of sorted){
+    const drawState = a.isWalking ? 'walk' : a.state;
+    const drawX = a.x - CHAR_S/2;
+    const drawY = a.y - CHAR_S;
+    const bob = (!a.isWalking && (a.state==='idle'||a.state==='done'||a.state==='reading'))
+      ? Math.sin(fc*.03+a.bobPhase)*2 : 0;
+    const finalY = drawY + bob;
+    const flip = !a.facingRight;
+
+    // 影子
+    drawShadow(drawX, finalY, CHAR_S);
+
+    // 前置特效
+    if(!a.isWalking){
+      if(a.state==='done')fxGold(drawX,finalY,CHAR_S,fc);
+      if(a.state==='running')fxSpeed(drawX,finalY,CHAR_S,fc);
+    }
+
+    // 角色圖
+    const charImg = imgs.chars[a.colorName]?.[drawState];
+    if(!drawCharImage(charImg, drawX, finalY, CHAR_S, flip)){
+      drawFallback(drawX, finalY, CHAR_S, a.colorHex, drawState==='walk'?'walk':a.state, a.isWalking, fc);
+    }
+
+    // 後置特效
+    if(!a.isWalking){
+      if(a.state==='idle')fxQi(drawX,finalY,CHAR_S,fc,'normal');
+      if(a.state==='thinking')fxQi(drawX,finalY,CHAR_S,fc,'strong');
+      if(a.state==='writing')fxSword(drawX,finalY,CHAR_S,fc);
+      if(a.state==='reading')fxScroll(drawX,finalY,CHAR_S,fc);
+    }
+
+    // 走路塵土
+    if(a.isWalking)fxDust(drawX,finalY,CHAR_S,fc);
+
+    // 名字
+    cx.save();cx.font='12px "ZCOOL KuaiLe",serif';cx.textAlign='center';
+    cx.shadowColor='rgba(0,0,0,.6)';cx.shadowBlur=3;
+    cx.fillStyle=a.colorHex;cx.globalAlpha=.85;
+    cx.fillText(a.name,a.x,finalY-6);cx.restore();
+
+    // 對話泡泡
+    if(a.bt>0&&a.bub){
+      const al=Math.min(1,a.bt<30?a.bt/30:1);
+      cx.save();cx.globalAlpha=al;cx.font='12px "Ma Shan Zheng",serif';
+      const tw=cx.measureText(a.bub).width,bx=a.x,by=finalY-14,pad=7;
+      cx.shadowColor='rgba(0,0,0,.3)';cx.shadowBlur=5;
+      cx.fillStyle='rgba(255,252,240,.92)';cx.beginPath();cx.roundRect(bx-tw/2-pad,by-16,tw+pad*2,21,5);cx.fill();
+      cx.shadowBlur=0;cx.beginPath();cx.moveTo(bx-3,by+5);cx.lineTo(bx+3,by+5);cx.lineTo(bx,by+9);cx.fill();
+      cx.fillStyle='#2a1a10';cx.textAlign='center';cx.fillText(a.bub,bx,by-2);
+      cx.restore();a.bt--;
+    }
+  }
+
+  drawFlies(fc);
+  requestAnimationFrame(render);
+}
+render();
+
+// ============================================================
+// API
+// ============================================================
+async function poll(){
+  try{
+    const r=await fetch('/api/state');if(!r.ok)throw 0;
+    const d=await r.json();
+    if(!connected){connected=true;demoMode=false;document.getElementById('connDot').classList.add('on');document.getElementById('connText').textContent='已連線';}
+    if(d.agents&&d.agents.length>0){
+      // 超過 6 個時只保留最近更新的 6 個
+      let serverAgents=d.agents;
+      if(serverAgents.length>6){
+        serverAgents=[...serverAgents].sort((a,b)=>b.last_update-a.last_update).slice(0,6);
+      }
+      const rids=new Set(serverAgents.map(a=>a.session_id));
+      // 連線後移除 demo 角色，只保留真實 agent
+      agents=agents.filter(a=>rids.has(a.id));
+      for(const ra of serverAgents){
+        let l=agents.find(a=>a.id===ra.session_id);
+        if(!l){l=mkAgent(ra.session_id,null,agents.length);agents.push(l);}
+        setSt(l,ra.state||'idle',ra.tool||'');
+      }
+      updateR();
+    }
+  }catch{
+    if(connected){connected=false;demoMode=true;document.getElementById('connDot').classList.remove('on');document.getElementById('connText').textContent='Demo';}
+  }
+}
+setInterval(poll,500);poll();
+
+updateR();
+</script>
+</body>
+</html>
